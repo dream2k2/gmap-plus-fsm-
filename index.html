@@ -159,8 +159,9 @@
         <div class="row" style="margin-top:6px">
           <button class="warn small" onclick="clearPts()">전체 삭제</button>
           <button class="small" onclick="undoPt()">↩ 되돌리기</button>
+          <button class="small" id="measureBtn" onclick="toggleMeasure()">✋ 지정 종료</button>
         </div>
-        <div class="muted" style="font-size:10px;margin-top:5px">우클릭(또는 길게 누르기) = 마지막 지점 취소</div>
+        <div class="muted" style="font-size:10px;margin-top:5px">탭 = 지점 추가 · 우클릭(길게 누르기) = 지정 종료</div>
       </div>
 
       <div class="card">
@@ -214,13 +215,36 @@ let watchId=null, geocoder=null;
 
 const fmt = v => v.toFixed(7);
 
+/* ---------- 지점별 색상 팔레트 ---------- */
+const PALETTE=['#38b6ff','#ff6b6b','#4cd07d','#ffc53d','#b28dff','#ff9f43','#00d2d3','#ff7eb3','#7bed9f','#e84393'];
+const colorOf=i=>PALETTE[i%PALETTE.length];
+
+/* ---------- 지점 지정 모드 (더블클릭 = 종료) ---------- */
+let measuring=true;
+function setMeasureUI(){
+  const b=document.getElementById('measureBtn');
+  if(b) b.textContent=measuring?'✋ 지정 종료':'▶ 지정 재개';
+}
+function toggleMeasure(){
+  measuring=!measuring;
+  if(!measuring) hideRubber();
+  setMeasureUI();
+  toast(measuring?'지점 지정 재개 — 지도를 탭하세요':'지점 지정 종료');
+}
+function finishMeasure(){
+  if(!measuring) return;
+  measuring=false; hideRubber(); setMeasureUI();
+  toast('지점 지정 종료 (재개: 패널의 ▶ 버튼)');
+}
+
 /* ---------- 반경 원 ---------- */
 function radiusVal(){ return Math.max(1, parseFloat(document.getElementById('radiusInput').value)||500); }
 function radiusOn(){ return document.getElementById('radiusToggle').checked; }
-function makeCircle(lat,lng){
+function makeCircle(lat,lng,i){
+  const c=colorOf(i);
   return new google.maps.Circle({map, center:{lat,lng}, radius:radiusVal(),
-    visible:radiusOn(), fillColor:'#38b6ff', fillOpacity:.13,
-    strokeColor:'#5b9bd5', strokeOpacity:.8, strokeWeight:1.5, clickable:false});
+    visible:radiusOn(), fillColor:c, fillOpacity:.13,
+    strokeColor:c, strokeOpacity:.85, strokeWeight:1.5, clickable:false});
 }
 function applyRadius(){
   const r=radiusVal(), on=radiusOn();
@@ -381,9 +405,9 @@ function initMap(){
     disableDefaultUI:true, zoomControl:true, gestureHandling:'greedy',
     tilt:0
   });
-  map.addListener('click', e=>{ addPt(e.latLng.lat(), e.latLng.lng()); updateRubber(e.latLng); });
-  map.addListener('mousemove', e=>updateRubber(e.latLng));
-  map.addListener('rightclick', ()=>undoPt()); // 우클릭/길게누르기 = 마지막 지점 취소
+  map.addListener('click', e=>{ if(!measuring) return; addPt(e.latLng.lat(), e.latLng.lng()); updateRubber(e.latLng); });
+  map.addListener('mousemove', e=>{ if(measuring) updateRubber(e.latLng); });
+  map.addListener('rightclick', ()=>finishMeasure()); // 우클릭/길게누르기 = 지점 지정 종료
   map.addListener('mouseout', ()=>hideRubber());
 
   // ===== 위성+ (오버줌) 커스텀 레이어 =====
@@ -492,7 +516,7 @@ function addPt(lat,lng){
   const label=String.fromCharCode(65+(idx%26)); // A,B,C...
   const m=new google.maps.Marker({map, position:{lat,lng},
     label:{text:label, color:'#111', fontWeight:'800', fontSize:'12px'},
-    icon:{path:google.maps.SymbolPath.CIRCLE, scale:12, fillColor:'#ffc53d',
+    icon:{path:google.maps.SymbolPath.CIRCLE, scale:12, fillColor:colorOf(idx),
           fillOpacity:1, strokeColor:'#fff', strokeWeight:2},
     draggable:true});
   m.addListener('dragend', e=>{
@@ -502,15 +526,20 @@ function addPt(lat,lng){
     renderPts(); drawLine(); updateDist();
   });
   markers.push(m);
-  circles.push(makeCircle(lat,lng));
+  circles.push(makeCircle(lat,lng,idx));
   renderPts(); drawLine(); updateDist();
 }
 function delPt(i){
   markers[i].setMap(null);
   circles[i].setMap(null);
   pts.splice(i,1); markers.splice(i,1); circles.splice(i,1);
-  // 라벨 재정렬
-  markers.forEach((m,j)=>m.setLabel({text:String.fromCharCode(65+(j%26)),color:'#111',fontWeight:'800',fontSize:'12px'}));
+  // 라벨·색상 재정렬 (A,B,C... 순서에 맞게)
+  markers.forEach((m,j)=>{
+    m.setLabel({text:String.fromCharCode(65+(j%26)),color:'#111',fontWeight:'800',fontSize:'12px'});
+    m.setIcon({path:google.maps.SymbolPath.CIRCLE, scale:12, fillColor:colorOf(j),
+               fillOpacity:1, strokeColor:'#fff', strokeWeight:2});
+    circles[j].setOptions({fillColor:colorOf(j), strokeColor:colorOf(j)});
+  });
   hideRubber();
   renderPts(); drawLine(); updateDist();
 }
@@ -519,6 +548,7 @@ function clearPts(){
   circles.forEach(c=>c.setMap(null));
   pts=[]; markers=[]; circles=[];
   hideRubber();
+  measuring=true; setMeasureUI(); // 전체 삭제 시 지정 모드 재개
   renderPts(); drawLine(); updateDist();
 }
 function renderPts(){
@@ -532,7 +562,7 @@ function renderPts(){
       seg=`이전 지점에서 ${fmtDist(d)}`;
     }
     return `<div class="pt">
-      <div class="badge">${label}</div>
+      <div class="badge" style="background:${colorOf(i)}">${label}</div>
       <div class="info">
         <div class="ll" onclick="copyText('${fmt(p.lat)}, ${fmt(p.lng)}')">${fmt(p.lat)}, ${fmt(p.lng)}</div>
         <div class="seg">${seg||'시작 지점 · 드래그로 이동 가능'}</div>
