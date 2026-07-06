@@ -83,6 +83,7 @@
   .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#000c;color:#fff;
          padding:8px 16px;border-radius:20px;font-size:12px;z-index:200;opacity:0;transition:opacity .3s;pointer-events:none}
   .toast.show{opacity:1}
+  .dist-label{text-shadow:0 0 3px #000,0 0 6px #000,1px 1px 2px #000 !important}
 </style>
 </head>
 <body>
@@ -143,10 +144,23 @@
 
       <div class="card">
         <h2>🎯 선택 지점 <span class="muted">(지도를 탭)</span></h2>
+        <div class="row" style="align-items:center;margin-bottom:8px;gap:10px">
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px">
+            반경(m)
+            <input id="radiusInput" type="number" value="500" min="1" step="50"
+              style="width:72px;padding:5px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--txt);font-family:var(--mono);font-size:12px"
+              onchange="applyRadius()">
+          </label>
+          <label style="display:flex;align-items:center;gap:5px;font-size:12px">
+            <input id="radiusToggle" type="checkbox" checked onchange="applyRadius()"> 반경 표시
+          </label>
+        </div>
         <div id="ptList"><div class="muted">지도를 탭하면 지점이 추가됩니다.</div></div>
         <div class="row" style="margin-top:6px">
           <button class="warn small" onclick="clearPts()">전체 삭제</button>
+          <button class="small" onclick="undoPt()">↩ 되돌리기</button>
         </div>
+        <div class="muted" style="font-size:10px;margin-top:5px">우클릭(또는 길게 누르기) = 마지막 지점 취소</div>
       </div>
 
       <div class="card">
@@ -194,10 +208,61 @@
 
 <script>
 let map, gps=null, gpsMarker=null, gpsCircle=null;
-let pts=[], markers=[], line=null;
+let pts=[], markers=[], circles=[], segLabels=[], line=null;
+let rubberLine=null, rubberLabel=null;
 let watchId=null, geocoder=null;
 
 const fmt = v => v.toFixed(7);
+
+/* ---------- 반경 원 ---------- */
+function radiusVal(){ return Math.max(1, parseFloat(document.getElementById('radiusInput').value)||500); }
+function radiusOn(){ return document.getElementById('radiusToggle').checked; }
+function makeCircle(lat,lng){
+  return new google.maps.Circle({map, center:{lat,lng}, radius:radiusVal(),
+    visible:radiusOn(), fillColor:'#38b6ff', fillOpacity:.13,
+    strokeColor:'#5b9bd5', strokeOpacity:.8, strokeWeight:1.5, clickable:false});
+}
+function applyRadius(){
+  const r=radiusVal(), on=radiusOn();
+  circles.forEach(c=>{ c.setRadius(r); c.setVisible(on); });
+}
+
+/* ---------- 거리 라벨 마커 (지도 위 텍스트) ---------- */
+function makeDistLabel(pos, text, color){
+  return new google.maps.Marker({map, position:pos, clickable:false, zIndex:999,
+    icon:{path:'M 0 0', scale:0},
+    label:{text, color:color||'#4cd07d', fontWeight:'800', fontSize:'14px', className:'dist-label'}});
+}
+function midOf(a,b){
+  return google.maps.geometry.spherical.interpolate(
+    new google.maps.LatLng(a.lat,a.lng), new google.maps.LatLng(b.lat,b.lng), 0.5);
+}
+
+/* ---------- 러버밴드 (마지막 지점 → 커서, 점선 + 거리 미리보기) ---------- */
+function updateRubber(cursor){
+  if(!pts.length || !cursor){ hideRubber(); return; }
+  const last=pts[pts.length-1];
+  const path=[new google.maps.LatLng(last.lat,last.lng), cursor];
+  if(!rubberLine){
+    rubberLine=new google.maps.Polyline({map, path, clickable:false,
+      strokeOpacity:0,
+      icons:[{icon:{path:'M 0,-1 0,1', strokeOpacity:.9, strokeColor:'#38b6ff', scale:2.5},
+              offset:'0', repeat:'14px'}]});
+  }else rubberLine.setPath(path);
+  const d=google.maps.geometry.spherical.computeDistanceBetween(path[0], path[1]);
+  const mid=google.maps.geometry.spherical.interpolate(path[0], path[1], 0.5);
+  if(!rubberLabel) rubberLabel=makeDistLabel(mid, fmtDist(d), '#4cd07d');
+  else{ rubberLabel.setPosition(mid); rubberLabel.setLabel({text:fmtDist(d), color:'#4cd07d', fontWeight:'800', fontSize:'14px', className:'dist-label'}); }
+}
+function hideRubber(){
+  if(rubberLine){ rubberLine.setMap(null); rubberLine=null; }
+  if(rubberLabel){ rubberLabel.setMap(null); rubberLabel=null; }
+}
+
+function undoPt(){
+  if(!pts.length){ toast('취소할 지점이 없습니다'); return; }
+  delPt(pts.length-1);
+}
 
 /* ---------- 장소/좌표 검색 ---------- */
 let searchMarker=null, searchResultsData=[];
@@ -316,7 +381,10 @@ function initMap(){
     disableDefaultUI:true, zoomControl:true, gestureHandling:'greedy',
     tilt:0
   });
-  map.addListener('click', e=>addPt(e.latLng.lat(), e.latLng.lng()));
+  map.addListener('click', e=>{ addPt(e.latLng.lat(), e.latLng.lng()); updateRubber(e.latLng); });
+  map.addListener('mousemove', e=>updateRubber(e.latLng));
+  map.addListener('rightclick', ()=>undoPt()); // 우클릭/길게누르기 = 마지막 지점 취소
+  map.addListener('mouseout', ()=>hideRubber());
 
   // ===== 위성+ (오버줌) 커스텀 레이어 =====
   // 네이티브 이미지가 없는 고배율에서는 하위 줌 타일을 잘라 확대해 표시 (빈 화면 방지)
@@ -428,22 +496,29 @@ function addPt(lat,lng){
           fillOpacity:1, strokeColor:'#fff', strokeWeight:2},
     draggable:true});
   m.addListener('dragend', e=>{
-    pts[idx]={lat:e.latLng.lat(), lng:e.latLng.lng()};
+    const i=markers.indexOf(m);
+    pts[i]={lat:e.latLng.lat(), lng:e.latLng.lng()};
+    circles[i].setCenter(pts[i]);
     renderPts(); drawLine(); updateDist();
   });
   markers.push(m);
+  circles.push(makeCircle(lat,lng));
   renderPts(); drawLine(); updateDist();
 }
 function delPt(i){
   markers[i].setMap(null);
-  pts.splice(i,1); markers.splice(i,1);
+  circles[i].setMap(null);
+  pts.splice(i,1); markers.splice(i,1); circles.splice(i,1);
   // 라벨 재정렬
   markers.forEach((m,j)=>m.setLabel({text:String.fromCharCode(65+(j%26)),color:'#111',fontWeight:'800',fontSize:'12px'}));
+  hideRubber();
   renderPts(); drawLine(); updateDist();
 }
 function clearPts(){
   markers.forEach(m=>m.setMap(null));
-  pts=[]; markers=[];
+  circles.forEach(c=>c.setMap(null));
+  pts=[]; markers=[]; circles=[];
+  hideRubber();
   renderPts(); drawLine(); updateDist();
 }
 function renderPts(){
@@ -468,9 +543,15 @@ function renderPts(){
 }
 function drawLine(){
   if(line) line.setMap(null);
+  segLabels.forEach(l=>l.setMap(null)); segLabels=[];
   if(pts.length<2){ line=null; return; }
   line=new google.maps.Polyline({map, path:pts, strokeColor:'#ffc53d',
-    strokeWeight:3, strokeOpacity:.9, geodesic:true});
+    strokeWeight:3, strokeOpacity:.9, geodesic:true, clickable:false});
+  // 각 구간 중앙에 거리 표시
+  for(let i=1;i<pts.length;i++){
+    const d=haversine(pts[i-1],pts[i]);
+    segLabels.push(makeDistLabel(midOf(pts[i-1],pts[i]), fmtDist(d), '#4cd07d'));
+  }
 }
 
 /* ---------- 거리 ---------- */
